@@ -1,0 +1,246 @@
+---
+title: "CPI Financial Forecast"
+author: "Vikram D'Mello"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+
+options(scipen = 999)
+options(digits = 3)
+par(bg = "antiquewhite", xaxs = 'i')
+
+require("bit64")
+require(tidyverse)
+require(blscrapeR)
+require(forecast)
+
+require(ggplot2)
+require(ggthemes)
+require(ggfortify)
+
+setwd('/Users/vix/Library/CloudStorage/OneDrive-Personal/04_Coding/Time Series')
+
+```
+
+## CPI Forecast
+
+Using Holt-Winters exponential smoothing, accounting for trend and seasonality
+
+```{r Read source data, echo=FALSE}
+
+# df <- data.frame()
+
+dfTemp <- 
+    bls_api(c("CUUR0000SA0"), 
+            startyear = 2023, endyear = 2023, 
+            Sys.getenv("BLS_KEY")) %>% 
+    spread(seriesID, value) %>% dateCast() 
+
+df <- rbind(df, dfTemp)
+rm(dfTemp)
+
+# str(df)
+head(df)
+tail(df)
+
+```
+
+```{r Correct data types, echo=FALSE}
+
+df$Calangute <- as.numeric(df$Calangute)
+df$Margao <- as.numeric(df$Margao)
+df$Miramar <- as.numeric(df$Miramar)
+df$Patto <- as.numeric(df$Patto)
+df$Ponda <- as.numeric(df$Ponda)
+df$MeridienSpa <- as.numeric(df$MeridienSpa)
+
+head(df)
+str(df)
+
+```
+
+```{r Convert to date-aware, echo=FALSE}
+
+df$Date <- as.Date(paste(df$Month, "01", sep = "-"), "%b-%y-%d")
+
+head(df)
+str(df)
+
+```
+
+```{r Impute missing values, eval=FALSE, include=FALSE}
+
+dfMissing <- df
+
+df$Calangute[is.na(df$Calangute)] <- mean(df$Calangute, na.rm=TRUE)
+df$Margao[is.na(df$Margao)] <- mean(df$Margao, na.rm=TRUE)
+df$Miramar[is.na(df$Miramar)] <- mean(df$Miramar, na.rm=TRUE)
+df$Patto[is.na(df$Patto)] <- mean(df$Patto, na.rm=TRUE)
+df$Ponda[is.na(df$Ponda)] <- mean(df$Ponda, na.rm=TRUE)
+df$MeridienSpa[is.na(df$MeridienSpa)] <- mean(df$MeridienSpa, na.rm=TRUE)
+
+head(df)
+str(df)
+
+```
+
+```{r Segregate training and test subsets, echo=FALSE}
+
+# Establish training & test dataset split
+dfTraining <- df[1:(nrow(df)*0.8), ]
+dfTest <- df[((nrow(df)*0.8)+1):nrow(df), ]
+dfTraining
+dfTest
+
+```
+
+```{r Create time series object for forecasting, echo=FALSE}
+
+# dftsCPI <- ts(dfTraining$CUUR0000SA0[!is.na(dfTraining$CUUR0000SA0)], frequency = 12, start = c(1913, 01))
+dftsCPI <- ts(dfTraining$CUUR0000SA0[!is.na(dfTraining$CUUR0000SA0)], frequency = 12, start = c(1913, 01))
+
+print(dftsCPI)
+
+```
+
+```{r Decompose time series components, echo=FALSE}
+
+decompMultCPI <- decompose(dftsCPI, type = "multiplicative")
+plot(decompMultCPI, type = "l", )
+title(main = "\nCPI") 
+
+# Multiplicative seems more appropriate - far less random component of trend
+```
+
+```{r Model hyperparameter tuning}
+
+dfError <- data.frame()
+
+    for(par_alpha in seq(from = 0.1, to = 0.9, by = 0.1)){
+        for(par_beta in seq(from = 0, to = 0.9, by = 0.1)){
+            for(par_gamma in seq(from = 0, to = 0.9, by = 0.1)){
+                
+                iteration <- paste0(par_alpha, " - ", par_beta, " - ", par_gamma)
+    
+                modelCurr <- HoltWinters(
+                    dftsCPI, 
+                    alpha=par_alpha, beta=par_beta, gamma=par_gamma, seasonal = "mult")
+                predCurr <- forecast(
+                    modelCurr, h=nrow(dfTest), level=0.95, robust=TRUE)
+                dfTest$predCPI <- predCurr$mean
+                dfTest$errorCPI <- round((dfTest$predCPI - dfTest$CUUR0000SA0) / dfTest$CUUR0000SA0 * 100, 0)
+                
+                meanError <- mean(c(abs(dfTest$errorCPI)))
+                dfError = rbind(dfError, c(iteration, meanError))
+    
+            }
+        }
+    }
+
+names(dfError) <- c("Parameters", "MeanError")
+dfError$MeanError <- as.numeric(dfError$MeanError)
+str(dfError)
+head(dfError)
+min(dfError$MeanError)
+max(dfError$MeanError)
+mean(dfError$MeanError)
+best <- subset(dfError, dfError$MeanError <= min(dfError$MeanError))
+best
+```
+
+```{r Fit Holt-Winters base model, echo=FALSE}
+
+# Fitting the model
+
+modelCPI <- HoltWinters(dftsCPI, alpha=0.1, beta=0.9, gamma=0.3, seasonal = "mult") 
+# Multiplicative / 0.1-0.9-0.3 / error 1.7%
+# Multiplicative / 0.2-0.4-0.5 / error 1.7%
+
+```
+
+```{r Visually evaluate the fits, echo=FALSE}
+ 
+# Save to PNG 
+plot(modelCPI$x, xlab="", ylab="CPI 1982/84", xlim=c(1913, 2023), col="grey80", lty=1, lwd=4)
+lines(modelCPI$fitted, lty=1, col="purple3", lwd=3)
+title("\nCPI") 
+
+```
+
+```{r Evaluate test dataset predictions, echo=FALSE}
+
+predCPI <- forecast(modelCPI, h=266, level=0.95, robust=TRUE)
+dfTest$predCPI <- predCPI$mean
+dfTest$errorCPI <- round((dfTest$predCPI - dfTest$CUUR0000SA0) / dfTest$CUUR0000SA0 * 100, 0)
+
+dfTest
+
+mean(c(abs(dfTest$errorCPI)))
+
+```
+
+```{r Predict future months, echo=FALSE}
+
+predCPI <- forecast(modelCPI, h=266, level=0.95, robust=TRUE)
+
+```
+
+```{r Evaluate full forecast predictions, echo=FALSE}
+par(bg = "antiquewhite")
+
+plot(predCPI$x, axes = FALSE)
+tsp <- attributes(predCPI$x)$tsp
+dates <- seq(as.Date("1913-01-01", "%Y-%m-%d"), by = "month", along = predCPI$x)
+axis(2, at = seq(min(predCPI$x), max(predCPI$x), along = predCPI$x))
+axis(1, at = seq(tsp[1], tsp[2], along = predCPI$x), labels = format(dates, "%Y-%b"), las = 2)
+
+autoplot(predCPI$x, ts.geom = 'ribbon', ts.fill = 'gold3') + 
+    geom_line(aes(y = predCPI$fitted), color = 'turquoise4', size = 3) + 
+    geom_line(aes(y = predCPI$mean), color = 'turquoise3', size = 2, linetype = 'dashed') +
+    scale_x_date(labels = date_format("%Y %b")) + 
+    scale_y_continuous(labels = scales::comma) +
+    labs(title = ("CPI Prediction"), 
+         subtitle = "Holt-Winters Exponential Smoothing", 
+         x = "", 
+         y = "\n CPI Base 1982/84 \n", 
+         caption = "") + 
+    theme_economist() + 
+    theme(text = element_text(family = "Fira Sans"), 
+          plot.title = element_text(color = "steelblue4", size = 12, face = "bold", hjust = 0), 
+          plot.subtitle = element_text(color = "sienna", size = 10, hjust = 0), 
+          plot.caption = element_text(color = "grey50", size = 6, hjust = 1), 
+          legend.title = element_blank(), 
+          legend.text = element_text(size = 8), 
+          legend.key.size = unit(0.8, "lines"), 
+          strip.text.x = element_text(size = 10))
+
+
+
+
+
+
+
+
+
+plot(predCPI$x, xlim=c(1978.1, 2025.12), col="grey80", lty=1, lwd=2, xaxt='s')
+axis(side = 1, xaxp = c(1978.1, 2025.12))
+lines(predCPI$fitted, col="sienna3", lty=2, lwd=3)
+plot(predCPI$mean, col="purple3", lty=1, lwd=4)
+title("\nCPI Prediction")
+# axis(1, xaxp=c(10, 200, 19))
+
+
+ggplot(predCPI$x, aes(y = x)) +
+  geom_line()
+
+
+
+
+
+# Inspect distribution of prediction residuals 
+# (Should be close to normal)
+# hist(predCPI$residuals)
+
+```
